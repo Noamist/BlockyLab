@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Blocky Lab — analyse RNG</title>
+<style>
+    :root { --bg:#111214; --panel:#1e1f22; --line:#2f3136; --txt:#f2f3f5; --mut:#9aa1ab; --blur:#5865f2; --good:#248046; --bad:#b93838; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--txt); font:14px/1.5 "gg sans",Segoe UI,Arial,sans-serif; }
+    header { display:flex; align-items:center; gap:12px; padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:3; }
+    header h1 { font-size:16px; margin:0; letter-spacing:.3px; }
+    header .sp { flex:1; }
+    .badge { font-size:11px; padding:3px 8px; border-radius:20px; background:#2b2d31; color:var(--mut); }
+    main { max-width:1080px; margin:0 auto; padding:18px 20px 60px; }
+    nav { display:flex; gap:4px; margin-bottom:16px; flex-wrap:wrap; }
+    nav button { background:transparent; border:0; border-bottom:2px solid transparent; color:var(--mut); padding:7px 11px; cursor:pointer; font:600 13px inherit; }
+    nav button.on { color:var(--txt); border-bottom-color:var(--blur); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:13px 15px; }
+    .card h3 { margin:0 0 8px; font-size:12px; color:var(--mut); font-weight:600; letter-spacing:.4px; text-transform:uppercase; }
+    .kpi { font-size:26px; font-weight:800; }
+    .sub { font-size:12px; color:var(--mut); }
+    .good { color:#57f287; } .bad { color:#ed4245; } .warn { color:#fee75c; }
+    table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
+    th,td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); }
+    th { color:var(--mut); font-weight:600; }
+    canvas { width:100%; height:150px; display:block; }
+    .wheel { display:grid; grid-template-columns:repeat(10,1fr); gap:3px; margin-top:8px; }
+    .wheel div { border-radius:4px; text-align:center; font-size:11px; padding:5px 2px; line-height:1.25; }
+    .row { display:flex; justify-content:space-between; gap:10px; padding:3px 0; border-bottom:1px solid rgba(255,255,255,.05); }
+    .row b { font-variant-numeric:tabular-nums; }
+    .bar { height:5px; background:#111214; border-radius:3px; overflow:hidden; margin:3px 0 7px; }
+    .bar i { display:block; height:100%; background:var(--blur); }
+    .empty { color:var(--mut); padding:40px 0; text-align:center; }
+</style>
+</head>
+<body>
+<header>
+    <h1>⛏️ Blocky Lab</h1>
+    <span class="badge" id="health">connexion…</span>
+    <span class="sp"></span>
+    <span class="badge" id="stamp">—</span>
+</header>
+<main>
+    <nav id="nav">
+        <button data-tab="overview" class="on">Vue d'ensemble</button>
+        <button data-tab="lucky">Lucky Block</button>
+        <button data-tab="wheel">Wheel</button>
+        <button data-tab="hours">Heures</button>
+        <button data-tab="data">Données</button>
+    </nav>
+    <div id="view"></div>
+</main>
+<script>
+    let stats = null;
+    let tab = "overview";
+
+    const el = (tag, props = {}, ...kids) => {
+        const n = document.createElement(tag);
+        for (const [k, v] of Object.entries(props)) {
+            if (k === "class") n.className = v;
+            else if (k === "html") n.innerHTML = v;
+            else if (k === "style") n.setAttribute("style", v);
+            else if (k in n) n[k] = v;
+            else n.setAttribute(k, v);
+        }
+        for (const kid of kids) n.append(kid);
+        return n;
+    };
+    const pct = x => x === null || x === undefined ? "—" : (x * 100).toFixed(2) + " %";
+    const p4 = p => p === null || p === undefined ? "—" : p < 0.0001 ? "< 0,0001" : p.toFixed(4);
+
+    async function refresh() {
+        try {
+            const r = await fetch("/api/stats", { cache: "no-store" });
+            stats = await r.json();
+            document.getElementById("health").textContent = `${stats.total} observations`;
+            document.getElementById("health").className = "badge good";
+            document.getElementById("stamp").textContent = new Date(stats.generatedAt).toLocaleTimeString();
+            render();
+        } catch (e) {
+            document.getElementById("health").textContent = "serveur hors ligne";
+            document.getElementById("health").className = "badge bad";
+        }
+    }
+
+    function chart(canvas, values, color = "#5865f2") {
+        const dpr = window.devicePixelRatio || 1;
+        const w = canvas.clientWidth, hgt = canvas.clientHeight || 150;
+        canvas.width = w * dpr; canvas.height = hgt * dpr;
+        const c = canvas.getContext("2d");
+        c.scale(dpr, dpr);
+        c.clearRect(0, 0, w, hgt);
+        const max = Math.max(1, ...values);
+        const bw = w / values.length;
+        for (let i = 0; i < values.length; i++) {
+            const bh = (values[i] / max) * (hgt - 18);
+            c.fillStyle = typeof color === "function" ? color(i, values[i]) : color;
+            c.fillRect(i * bw + 1, hgt - bh - 14, Math.max(1, bw - 2), bh);
+        }
+        c.fillStyle = "#9aa1ab"; c.font = "10px Arial";
+        for (let i = 0; i < values.length; i += Math.ceil(values.length / 12)) c.fillText(String(i), i * bw + 2, hgt - 2);
+    }
+
+    function overview() {
+        const v = el("div");
+        const g = el("div", { class: "grid" });
+        const games = Object.entries(stats.byGame).sort((a, b) => b[1] - a[1]);
+        g.append(
+            el("div", { class: "card" }, el("h3", {}, "Observations"), el("div", { class: "kpi" }, String(stats.total)), el("div", { class: "sub" }, `${games.length} jeux distincts`)),
+            el("div", { class: "card" }, el("h3", {}, "RTP Lucky Block"), el("div", { class: "kpi " + (stats.lucky.rtp > 1 ? "good" : "bad") }, pct(stats.lucky.rtp)), el("div", { class: "sub" }, `théorique ${pct(stats.lucky.expectedRtp)} · n=${stats.lucky.n}`)),
+            el("div", { class: "card" }, el("h3", {}, "Wheel χ²"), el("div", { class: "kpi " + (stats.wheel.chi2 && stats.wheel.chi2.p > 0.05 ? "good" : "warn") }, stats.wheel.chi2 ? `p=${p4(stats.wheel.chi2.p)}` : "—"), el("div", { class: "sub" }, `${stats.wheel.n} tirages · H=${stats.wheel.entropy.toFixed(2)}/${stats.wheel.maxEntropy.toFixed(2)}`)),
+            el("div", { class: "card" }, el("h3", {}, "Blackjack"), el("div", { class: "kpi" }, pct(stats.blackjack.rate)), el("div", { class: "sub" }, `n=${stats.blackjack.n} · z=${stats.blackjack.z === null ? "—" : stats.blackjack.z.toFixed(2)}`))
+        );
+        v.append(g);
+
+        const card = el("div", { class: "card" }, el("h3", {}, "Volume par jeu"));
+        for (const [name, n] of games) {
+            card.append(el("div", { class: "row" }, el("span", {}, name), el("b", {}, String(n))));
+            const bar = el("div", { class: "bar" }, el("i"));
+            bar.firstChild.style.width = `${Math.round(n / Math.max(1, games[0][1]) * 100)}%`;
+            card.append(bar);
+        }
+        v.append(card);
+
+        const recent = el("div", { class: "card" }, el("h3", {}, "Dernières observations"));
+        const t = el("table");
+        t.append(el("tr", {}, ...["Heure", "Jeu", "Résultat", "Détail"].map(h => el("th", {}, h))));
+        for (const o of stats.recent.slice(0, 20)) {
+            t.append(el("tr", {},
+                el("td", {}, new Date(o.ts).toLocaleTimeString()),
+                el("td", {}, o.game),
+                el("td", { class: o.label === "win" ? "good" : o.label === "loss" ? "bad" : "" }, o.label || "—"),
+                el("td", {}, o.detail?.category || (o.detail?.number !== undefined && o.detail?.number !== null ? `n°${o.detail.number} ${o.detail.color || ""}` : ""))
+            ));
+        }
+        recent.append(t);
+        v.append(recent);
+        return v;
+    }
+
+    function lucky() {
+        const L = [["Creeper", "creeper"], ["Cobblestone", "cobblestone"], ["Fer", "iron"], ["Or", "gold"], ["Diamant", "diamonds"], ["Émeraude", "emeralds"], ["Netherite", "netherite"]];
+        const P = [0.315, 0.22, 0.18, 0.15, 0.09, 0.04, 0.005];
+        const counts = L.map(([, k]) => stats.lucky.counts[k] || 0);
+        const n = counts.reduce((a, b) => a + b, 0);
+        const v = el("div");
+        const card = el("div", { class: "card" }, el("h3", {}, "Distribution observée vs documentée"));
+        const c = el("canvas"); card.append(c);
+        const c2 = el("canvas"); card.append(c2);
+        if (!n) card.append(el("div", { class: "empty" }, "Aucune donnée Lucky Block."));
+        else {
+            const t = el("table");
+            t.append(el("tr", {}, ...["Issue", "Observé", "Attendu", "z", "Multiplicateur"].map(h => el("th", {}, h))));
+            L.forEach(([label], i) => {
+                const z = (counts[i] / n - P[i]) / Math.sqrt(P[i] * (1 - P[i]) / n);
+                const mult = [0, 0.5, 1, 1.5, 2.5, 4, 10][i];
+                t.append(el("tr", {},
+                    el("td", {}, label),
+                    el("td", {}, `${counts[i]} (${pct(counts[i] / n)})`),
+                    el("td", {}, pct(P[i])),
+                    el("td", { class: Math.abs(z) > 2.5 ? "warn" : "" }, z.toFixed(2)),
+                    el("td", {}, "×" + mult)
+                ));
+            });
+            card.append(t);
+            setTimeout(() => { chart(c, counts); chart(c2, P.map(p => p * n), "#4e5058"); }, 0);
+        }
+        v.append(card);
+        const c3 = el("div", { class: "card" },
+            el("h3", {}, "Test global"),
+            el("div", { class: "row" }, el("span", {}, "χ² (df 6)"), el("b", {}, stats.lucky.chi2 ? stats.lucky.chi2.chi2.toFixed(2) : "—")),
+            el("div", { class: "row" }, el("span", {}, "p-value"), el("b", { class: stats.lucky.chi2 && stats.lucky.chi2.p < 0.05 ? "warn" : "good" }, stats.lucky.chi2 ? p4(stats.lucky.chi2.p) : "—")),
+            el("div", { class: "row" }, el("span", {}, "RTP mesuré"), el("b", {}, pct(stats.lucky.rtp))),
+            el("div", { class: "row" }, el("span", {}, "IC 95 %"), el("b", {}, stats.lucky.ci95 ? `[${pct(stats.lucky.ci95[0])} ; ${pct(stats.lucky.ci95[1])}]` : "—"))
+        );
+        v.append(c3);
+        return v;
+    }
+
+    function wheel() {
+        const v = el("div");
+        const card = el("div", { class: "card" }, el("h3", {}, "Fréquence des 37 numéros"));
+        const c = el("canvas"); card.append(c);
+        const grid = el("div", { class: "wheel" });
+        const max = Math.max(1, ...stats.wheel.counts);
+        stats.wheel.counts.forEach((n, i) => {
+            const red = [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36].includes(i);
+            const bg = i === 0 ? "#248046" : red ? "#5c2528" : "#2b2d31";
+            grid.append(el("div", { style: `background:${bg};opacity:${0.35 + 0.65 * n / max}`, html: `<b>${i}</b><br>${n}` }));
+        });
+        card.append(grid);
+        card.append(el("div", { class: "sub" }, `n=${stats.wheel.n} · χ²=${stats.wheel.chi2 ? stats.wheel.chi2.chi2.toFixed(2) : "—"} · p=${stats.wheel.chi2 ? p4(stats.wheel.chi2.p) : "—"} · entropie ${stats.wheel.entropy.toFixed(3)} / ${stats.wheel.maxEntropy.toFixed(3)} bits`));
+        v.append(card);
+        setTimeout(() => chart(c, stats.wheel.counts, i => i === 0 ? "#248046" : "#5865f2"), 0);
+        return v;
+    }
+
+    function hours() {
+        const v = el("div");
+        const card = el("div", { class: "card" }, el("h3", {}, "Activité par heure locale"));
+        const c = el("canvas"); card.append(c);
+        v.append(card);
+        setTimeout(() => chart(c, stats.hours, "#248046"), 0);
+        const days = el("div", { class: "card" }, el("h3", {}, "Par jour"));
+        for (const [day, n] of Object.entries(stats.days).sort().slice(-14)) {
+            days.append(el("div", { class: "row" }, el("span", {}, day), el("b", {}, String(n))));
+        }
+        v.append(days);
+        return v;
+    }
+
+    function data() {
+        const v = el("div");
+        const card = el("div", { class: "card" },
+            el("h3", {}, "Export"),
+            el("div", { class: "sub" }, "Les fichiers sont écrits dans server/data/observations.ndjson."),
+            el("p", {}, el("a", { href: "/api/export.csv", class: "good" }, "Télécharger le CSV")),
+            el("p", {}, el("a", { href: "/api/observations?limit=5000", class: "good" }, "Voir le JSON brut (5 000 dernières)"))
+        );
+        v.append(card);
+        const t = el("div", { class: "card" }, el("h3", {}, "Compteurs"));
+        for (const [k, n] of Object.entries(stats.byGameLabel).sort((a, b) => b[1] - a[1])) {
+            t.append(el("div", { class: "row" }, el("span", {}, k), el("b", {}, String(n))));
+        }
+        v.append(t);
+        return v;
+    }
+
+    function render() {
+        const view = document.getElementById("view");
+        view.textContent = "";
+        if (!stats) { view.append(el("div", { class: "empty" }, "Aucune donnée. Lance le serveur et le collecteur.")); return; }
+        const map = { overview, lucky, wheel, hours, data };
+        view.append(map[tab]());
+    }
+
+    document.getElementById("nav").addEventListener("click", e => {
+        const b = e.target.closest("button");
+        if (!b) return;
+        tab = b.dataset.tab;
+        [...document.querySelectorAll("#nav button")].forEach(x => x.classList.toggle("on", x === b));
+        render();
+    });
+
+    refresh();
+    setInterval(refresh, 5000);
+</script>
+</body>
+</html>

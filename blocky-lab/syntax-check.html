@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Blocky Lab — auto-test</title>
+<style>
+    body { background:#111214; color:#f2f3f5; font:13px/1.6 Consolas,monospace; padding:24px; }
+    h1 { font:700 17px Arial; }
+    .ok { color:#57f287; } .bad { color:#ed4245; }
+    pre { white-space:pre-wrap; }
+    a { color:#5865f2; }
+</style>
+</head>
+<body>
+<h1>Blocky Lab — auto-test hors ligne</h1>
+<p><a href="tools/simulator.html">Ouvrir le simulateur Monte Carlo</a> · <a href="unit-check.html">Tests noyau + blackjack</a></p>
+<pre id="out">…</pre>
+<script>
+    function gammaln(x) {
+        const c = [76.18009172947146, -86.50532032941677, 24.01409824083091, -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5];
+        let y = x;
+        const tmp = x + 5.5 - (x + 0.5) * Math.log(x + 5.5);
+        let ser = 1.000000000190015;
+        for (let j = 0; j < 6; j++) ser += c[j] / ++y;
+        return -tmp + Math.log(2.5066282746310005 * ser / x);
+    }
+    function gammaP(a, x) {
+        if (x <= 0) return 0;
+        if (x < a + 1) {
+            let sum = 1 / a, term = sum;
+            for (let n = 1; n < 300; n++) {
+                term *= x / (a + n);
+                sum += term;
+                if (Math.abs(term) < Math.abs(sum) * 1e-14) break;
+            }
+            return sum * Math.exp(-x + a * Math.log(x) - gammaln(a));
+        }
+        let b = x + 1 - a, c = 1e300, d = 1 / b, h = d;
+        for (let i = 1; i < 300; i++) {
+            const an = -i * (i - a);
+            b += 2;
+            d = an * d + b;
+            if (Math.abs(d) < 1e-300) d = 1e-300;
+            c = b + an / c;
+            if (Math.abs(c) < 1e-300) c = 1e-300;
+            d = 1 / d;
+            const del = d * c;
+            h *= del;
+            if (Math.abs(del - 1) < 1e-14) break;
+        }
+        return 1 - Math.exp(-x + a * Math.log(x) - gammaln(a)) * h;
+    }
+    const chi2P = (x, df) => (df <= 0 || x <= 0 ? 1 : 1 - gammaP(df / 2, x / 2));
+    function erf(x) {
+        const s = Math.sign(x), ax = Math.abs(x);
+        const t = 1 / (1 + 0.3275911 * ax);
+        const y = 1 - (((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t) * Math.exp(-ax * ax);
+        return s * y;
+    }
+    const pTwo = z => 1 - erf(Math.abs(z) / Math.SQRT2);
+
+    function survival(safe, digs) {
+        let p = 1;
+        for (let i = 0; i < digs; i++) p *= (safe - i) / (20 - i);
+        return p;
+    }
+
+    const lucky = [0.315, 0.22, 0.18, 0.15, 0.09, 0.04, 0.005];
+    const mult = [0, 0.5, 1, 1.5, 2.5, 4, 10];
+    const rtp = lucky.reduce((s, p, i) => s + p * mult[i], 0);
+
+    const tests = [
+        ["χ² p(3,841 ; df 1) = 0,05", chi2P(3.841458820694124, 1), v => Math.abs(v - 0.05) < 0.001],
+        ["z = 1,96 → p = 0,05", pTwo(1.96), v => Math.abs(v - 0.05) < 0.001],
+        ["z = 2 → p = 0,0455", pTwo(2), v => Math.abs(v - 0.0455) < 0.001],
+        ["Lucky Block RTP = 95 %", rtp, v => Math.abs(v - 0.95) < 0.001],
+        ["Mines 1 TNT / 1 bloc : survie 95 %", survival(19, 1), v => Math.abs(v - 0.95) < 1e-9],
+        ["Mines 1 TNT / 3 blocs : survie 85 %", survival(19, 3), v => Math.abs(v - 0.85) < 1e-9],
+        ["Mines 1 TNT / 3 blocs : EV = 107,95 %", 1.27 * survival(19, 3), v => Math.abs(v - 1.0795) < 1e-9],
+        ["Mines 1 TNT / 2 blocs : EV = 100,8 %", 1.12 * survival(19, 2), v => Math.abs(v - 1.008) < 1e-9]
+    ];
+
+    const out = document.getElementById("out");
+    let bad = 0;
+    let text = "";
+    for (const [name, value, ok] of tests) {
+        const pass = ok(value);
+        if (!pass) bad++;
+        text += `${pass ? "✅" : "❌"} ${name}  →  ${value.toFixed(6)}\n`;
+    }
+    text += bad ? `\n${bad} test(s) en échec.` : "\nTous les tests passent.";
+    out.textContent = text;
+</script>
+</body>
+</html>

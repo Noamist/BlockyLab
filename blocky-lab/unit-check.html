@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Blocky Lab — tests unitaires</title>
+<style>
+    body{background:#111214;color:#f2f3f5;font:13px/1.6 Consolas,monospace;padding:22px}
+    h1{font:700 17px Arial}
+    .ok{color:#57f287}.bad{color:#ed4245}.muted{color:#9aa1ab}
+    pre{white-space:pre-wrap}
+</style>
+</head>
+<body>
+<h1>Blocky Lab — tests unitaires</h1>
+<p class="muted">Charge le vrai noyau et le vrai script blackjack, puis vérifie la détection DOM et les parseurs sur des messages synthétiques.</p>
+<pre id="out">Chargement…</pre>
+
+<script>
+    const out = document.getElementById("out");
+    const results = [];
+    let done = false;
+
+    function log(line, ok) {
+        results.push({ line, ok });
+        out.innerHTML = results.map(r => `<span class="${r.ok === false ? "bad" : r.ok ? "ok" : "muted"}">${r.ok === false ? "❌" : r.ok ? "✅" : "•"} ${r.line}</span>`).join("\n");
+    }
+    function assert(name, cond, detail = "") {
+        log(`${name}${detail ? " — " + detail : ""}`, Boolean(cond));
+    }
+    function waitFor(fn, ms = 8000) {
+        return new Promise((resolve, reject) => {
+            const t0 = Date.now();
+            const tick = () => {
+                try { if (fn()) return resolve(true); } catch (_) { /* ignore */ }
+                if (Date.now() - t0 > ms) return reject(new Error("timeout"));
+                setTimeout(tick, 50);
+            };
+            tick();
+        });
+    }
+    function load(src) {
+        return new Promise((resolve, reject) => {
+            const s = document.createElement("script");
+            s.src = src;
+            s.onload = () => resolve();
+            s.onerror = () => reject(new Error("échec de chargement : " + src));
+            document.body.appendChild(s);
+        });
+    }
+
+    function makeMsg(labels, ids, text) {
+        const components = [{
+            type: 1,
+            components: labels.map((label, i) => ({ type: 2, label, custom_id: ids ? ids[i] : undefined }))
+        }];
+        return {
+            id: "100000000000000001",
+            channel_id: "100000000000000000",
+            author: { bot: true, id: "999" },
+            content: text || "Blackjack",
+            embeds: [],
+            components,
+            interaction: { user: { id: "me" } }
+        };
+    }
+    function makeRoot(labels, disabled = []) {
+        const root = document.createElement("div");
+        root.style.cssText = "position:absolute;left:-9999px;top:0;width:420px;padding:4px";
+        labels.forEach((label, i) => {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.textContent = label;
+            b.style.cssText = "width:90px;height:28px;display:inline-block;margin:2px";
+            b.disabled = Boolean(disabled[i]);
+            root.appendChild(b);
+        });
+        document.body.appendChild(root);
+        return root;
+    }
+    function labelsOf(map) {
+        return ["HIT", "STAND", "DOUBLE"].map(a => map.has(a) ? (map.get(a).label || map.get(a).customId || "?") : "—").join("|");
+    }
+
+    (async () => {
+        try {
+            await load("userscripts/00-blocky-core.user.js");
+            await waitFor(() => window.BlockyLab);
+            const lab = window.BlockyLab;
+            assert("Noyau chargé", Boolean(lab.version), "v" + lab.version);
+            const tradeSyntax = lab.discord.parseSlashCommand("/trade member:**@sebastator** give:emeralds (2092) give_amount:1 get:emeralds (1141) get_amount:1");
+            assert("Trade : annotations d'options ignorées", JSON.stringify(tradeSyntax.values) === JSON.stringify(["@sebastator", "emeralds", "1", "emeralds", "1"]), JSON.stringify(tradeSyntax.values));
+            const quotedSyntax = lab.discord.parseSlashCommand('/trade member:@sebastator give:"emerald blocks" give_amount:2');
+            assert("Slash : valeur quotée conservée", quotedSyntax.args[1]?.value === "emerald blocks", quotedSyntax.args[1]?.value || "null");
+            assert("Salon de drops configuré", lab.settings.dropChannelId === "1557793570243477524", lab.settings.dropChannelId);
+            const winObs = { text: "Blackjack — You win! Bet: 10 💎", detail: {} };
+            lab.analyze.reclassify(winObs);
+            assert("Classement auto gain + mise", winObs.label === "win" && winObs.detail.bet === 10, `${winObs.label}/${winObs.detail.bet}`);
+            const pushObs = { text: "Blackjack — Push: your bet back. Bet: 10 💎", detail: {} };
+            lab.analyze.reclassify(pushObs);
+            assert("Classement auto retour de mise", pushObs.label === "push" && pushObs.detail.refund === true, `${pushObs.label}/${pushObs.detail.refund}`);
+            const lossObs = { text: "Blackjack — Dealer wins. Bet: 25 💎", detail: {} };
+            lab.analyze.reclassify(lossObs);
+            assert("Classement auto perte", lossObs.label === "loss" && lossObs.detail.bet === 25, `${lossObs.label}/${lossObs.detail.bet}`);
+
+            await waitFor(() => document.getElementById("bl-panel"));
+            assert("Feuille de style v2 injectée", Boolean(document.getElementById("bl-style-v2")));
+            lab.settings.ui.theme = "light";
+            lab.settings.ui.width = 500;
+            lab.ui.applyPrefs();
+            const panel = document.getElementById("bl-panel");
+            assert("Thème clair appliqué", panel.dataset.theme === "light");
+            assert("Largeur personnalisée", panel.style.getPropertyValue("--bl-width") === "500px");
+            lab.settings.ui.theme = "dark";
+            lab.settings.ui.width = 430;
+            lab.ui.applyPrefs();
+            assert("Panneau déplaçable (poignée)", Boolean(panel.querySelector(".bl-head")));
+            const tabsEl = panel.querySelector(".bl-tabs");
+            assert("Barre d'onglets enroulable", tabsEl && getComputedStyle(tabsEl).flexWrap === "wrap");
+            lab.settings.ui.tabStyle = "pills";
+            lab.ui.applyPrefs();
+            assert("Style d'onglets pastilles", panel.dataset.tabs === "pills");
+            lab.settings.ui.tabStyle = "underline";
+            lab.ui.applyPrefs();
+
+            await load("userscripts/03-blocky-blackjack.user.js");
+            await waitFor(() => window.__blockyBjTest);
+            const bj = window.__blockyBjTest;
+            assert("API de test blackjack exposée", Boolean(bj.actionButtons && bj.analyseMessage));
+
+            const cases = [
+                { name: "Libellés anglais", labels: ["Hit", "Stand", "Double"], ids: ["bj_hit", "bj_stand", "bj_double"], expect: "HIT|STAND|DOUBLE" },
+                { name: "Libellés français", labels: ["Tirer", "Rester", "Doubler"], ids: null, expect: "HIT|STAND|DOUBLE" },
+                { name: "Emojis + custom_id", labels: ["👊", "✋", "💰"], ids: ["blackjack:hit", "blackjack:stand", "blackjack:double"], expect: "HIT|STAND|DOUBLE" },
+                { name: "Emojis sans custom_id (repli position)", labels: ["👊", "✋", "💰"], ids: null, expect: "HIT|STAND|DOUBLE" },
+                { name: "Libellés inconnus (repli position)", labels: ["A", "B", "C"], ids: null, expect: "HIT|STAND|DOUBLE" },
+                { name: "Capture réelle : emoji + libellé", labels: ["👊 Hit", "✋ Stand", "💰 Double"], ids: null, expect: "HIT|STAND|DOUBLE" }
+            ];
+            for (const c of cases) {
+                const root = makeRoot(c.labels);
+                const msg = makeMsg(c.labels, c.ids, "Blackjack — Your hand: 10♠ 7♥ Dealer: 9♦ 🂠");
+                const map = bj.actionButtons(root, msg).map;
+                assert(c.name, labelsOf(map) === c.expect, labelsOf(map));
+                root.remove();
+            }
+
+            {
+                const root = makeRoot(["Hit", "Stand", "Double"], [false, false, true]);
+                const msg = makeMsg(["Hit", "Stand", "Double"], ["bj_hit", "bj_stand", "bj_double"], "Blackjack — Your hand: 5♠ 6♥ Dealer: 9♦ 🂠");
+                const a = bj.analyseMessage(msg, root);
+                assert("Double désactivé → Tirer sur 11", a && a.action === "HIT", a ? a.action : "null");
+                root.remove();
+            }
+
+            {
+                const root = makeRoot(["Hit", "Stand", "Double"]);
+                const msg = makeMsg(["Hit", "Stand", "Double"], ["h", "s", "d"], "Blackjack — Your hand: 10♠ 7♥ Dealer: 9♦ 🂠");
+                const a = bj.analyseMessage(msg, root);
+                assert("Parse main 17 vs 9", a && a.player.total === 17 && a.up === 9, a ? `${a.player.total} vs ${a.up}` : "null");
+                assert("Stratégie 17 vs 9 → Rester", a && a.action === "STAND", a ? a.action : "null");
+                root.remove();
+            }
+
+            {
+                const root = makeRoot(["Hit", "Stand", "Double"]);
+                const msg = makeMsg(["Hit", "Stand", "Double"], ["h", "s", "d"], "Blackjack — Your total: 16 Dealer: 10");
+                const a = bj.analyseMessage(msg, root);
+                assert("Parse totaux textuels 16 vs 10", a && a.player.total === 16 && a.up === 10, a ? `${a.player.total} vs ${a.up}` : "null");
+                assert("16 vs 10 → Rester (déviation)", a && a.action === "STAND", a ? a.action : "null");
+                root.remove();
+            }
+
+            {
+                const root = makeRoot(["👊 Hit", "✋ Stand", "💰 Double"]);
+                const msg = makeMsg(["👊 Hit", "✋ Stand", "💰 Double"], null, "Blackjack — Dealer — 8♥ 🂠 · 8 + ?\nYou — 2♠ 4♣ · 6");
+                const a = bj.analyseMessage(msg, root);
+                assert("Capture : parse Dealer 8 / You 6", a && a.player.total === 6 && a.up === 8, a ? `${a.player.total} vs ${a.up}` : "null");
+                assert("Capture : 6 vs 8 → Tirer", a && a.action === "HIT", a ? a.action : "null");
+                root.remove();
+            }
+
+            {
+                const root = makeRoot(["Hit", "Stand", "Double"]);
+                const msg = makeMsg(["Hit", "Stand", "Double"], ["h", "s", "d"], "Blackjack — Your hand: 10♠ 7♥ Dealer: 9♦ 🂠");
+                bj.analyseMessage(msg, root);
+                assert("Aucun panneau injecté dans le message", !root.querySelector(".bl-bj") && !root.querySelector("#bl-bj-badge"));
+                root.remove();
+            }
+
+            {
+                for (let i = 0; i < 16; i++) lab.ui.tab({ id: "tmp" + i, title: "Onglet de test " + i, render: () => document.createElement("div") });
+                const strip = document.querySelector("#bl-panel .bl-tabs");
+                const buttons = [...strip.querySelectorAll(".bl-tab")];
+                assert("16 onglets restent accessibles", buttons.length >= 16, String(buttons.length));
+                assert("Pas de débordement horizontal", strip.scrollWidth <= strip.clientWidth + 1, `${strip.scrollWidth}/${strip.clientWidth}`);
+            }
+
+            const failed = results.filter(r => r.ok === false).length;
+            done = true;
+            log(failed ? `${failed} test(s) en échec.` : "Tous les tests passent.", failed ? false : true);
+            document.title = failed ? "FAIL" : "OK";
+        } catch (e) {
+            console.error(e);
+            log("Exception : " + (e && e.message || e), false);
+            document.title = "FAIL";
+            done = true;
+        }
+    })();
+</script>
+</body>
+</html>

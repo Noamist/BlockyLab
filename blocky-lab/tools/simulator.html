@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Blocky Lab — simulateur</title>
+<style>
+    :root { --bg:#111214; --panel:#1e1f22; --line:#2f3136; --txt:#f2f3f5; --mut:#9aa1ab; --blur:#5865f2; --good:#57f287; --bad:#ed4245; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--txt); font:14px/1.55 "gg sans",Segoe UI,Arial,sans-serif; }
+    header { padding:14px 20px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:10px; align-items:center; }
+    header h1 { font-size:16px; margin:0; }
+    main { max-width:960px; margin:0 auto; padding:18px 20px 60px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:12px; }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+    .card h2 { font-size:14px; margin:0 0 10px; }
+    label { display:flex; flex-direction:column; gap:3px; font-size:12px; color:var(--mut); margin:6px 0; }
+    input, select, button { background:#111214; border:1px solid var(--line); color:var(--txt); border-radius:6px; padding:7px 9px; font:13px inherit; }
+    button { background:var(--blur); border:0; font-weight:700; cursor:pointer; margin-top:8px; }
+    button:disabled { opacity:.5; cursor:wait; }
+    .row { display:flex; gap:8px; }
+    .row > * { flex:1; }
+    .out { font-variant-numeric:tabular-nums; font-size:13px; margin-top:10px; }
+    .kv { display:flex; justify-content:space-between; gap:10px; padding:3px 0; border-bottom:1px solid rgba(255,255,255,.06); }
+    .kv b { font-variant-numeric:tabular-nums; }
+    .good { color:var(--good); } .bad { color:var(--bad); } .mut { color:var(--mut); }
+    .note { color:var(--mut); font-size:12px; margin-top:10px; }
+    canvas { width:100%; height:120px; display:block; margin-top:10px; }
+</style>
+</head>
+<body>
+<header><h1>⛏️ Blocky Lab — simulateur Monte Carlo</h1><span class="mut">indépendant de Discord</span></header>
+<main>
+<div class="grid">
+    <section class="card">
+        <h2>Blackjack — stratégie de base</h2>
+        <div class="row">
+            <label>Mains<input id="bjN" type="number" value="100000" min="1000" max="2000000"></label>
+            <label>Jeux<input id="bjDecks" type="number" value="6" min="1" max="8"></label>
+        </div>
+        <button id="bjRun">Simuler</button>
+        <div class="out" id="bjOut"></div>
+        <canvas id="bjChart"></canvas>
+        <div class="note">Sabot réel, croupier reste sur 17, double sur 2 cartes, pas de split ni d'assurance, blackjack payé 3:2. L'EV attendue d'une stratégie de base 6 jeux S17 est d'environ −0,5 %.</div>
+    </section>
+
+    <section class="card">
+        <h2>Mines — EV du stop</h2>
+        <div class="row">
+            <label>TNT<input id="mTnt" type="number" value="1" min="1" max="10"></label>
+            <label>Blocs creusés<input id="mDig" type="number" value="3" min="1" max="10"></label>
+        </div>
+        <div class="row">
+            <label>Multiplicateur<input id="mMult" type="number" value="1.27" step="0.01" min="0"></label>
+            <label>Parties<input id="mN" type="number" value="200000" min="1000" max="2000000"></label>
+        </div>
+        <button id="mRun">Simuler</button>
+        <div class="out" id="mOut"></div>
+        <canvas id="mChart"></canvas>
+        <div class="note">La survie exacte est Π (S−i)/(20−i), avec S = 20 − TNT. EV = multiplicateur × survie. La simulation sert à vérifier la formule et la variance.</div>
+    </section>
+</div>
+</main>
+<script>
+    const $ = id => document.getElementById(id);
+    const pct = x => (x * 100).toFixed(3) + " %";
+
+    /* ----------------------------- Blackjack ----------------------------- */
+
+    const RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"];
+    const cardValue = r => r === "A" ? 11 : ["J", "Q", "K", "10"].includes(r) ? 10 : Number(r);
+
+    function shoe(decks) {
+        const s = [];
+        for (let d = 0; d < decks; d++) for (const r of RANKS) s.push(r);
+        for (let i = s.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [s[i], s[j]] = [s[j], s[i]];
+        }
+        return s;
+    }
+
+    function hand(cards) {
+        let total = cards.reduce((s, c) => s + cardValue(c), 0);
+        let aces = cards.filter(c => c === "A").length;
+        while (total > 21 && aces > 0) { total -= 10; aces--; }
+        return { total, soft: aces > 0 };
+    }
+
+    // Même table que le userscript 03.
+    function basic(cards, total, soft, up, canDouble) {
+        if (total >= 21) return "STAND";
+        const dbl = cards.length === 2 && canDouble;
+        if (soft) {
+            if (total >= 19) return "STAND";
+            if (total === 18) {
+                if (up >= 3 && up <= 6) return dbl ? "DOUBLE" : "STAND";
+                if (up === 2 || up === 7 || up === 8) return "STAND";
+                return "HIT";
+            }
+            if (total === 17) return dbl && up >= 3 && up <= 6 ? "DOUBLE" : "HIT";
+            if (total === 16 || total === 15) return dbl && up >= 4 && up <= 6 ? "DOUBLE" : "HIT";
+            if (total === 14 || total === 13) return dbl && up >= 5 && up <= 6 ? "DOUBLE" : "HIT";
+            return "HIT";
+        }
+        if (total >= 17) return "STAND";
+        if (total >= 13) return up >= 2 && up <= 6 ? "STAND" : "HIT";
+        if (total === 12) return up >= 4 && up <= 6 ? "STAND" : "HIT";
+        if (total === 11) return dbl && up !== 11 ? "DOUBLE" : "HIT";
+        if (total === 10) return dbl && up <= 9 ? "DOUBLE" : "HIT";
+        if (total === 9) return dbl && up >= 3 && up <= 6 ? "DOUBLE" : "HIT";
+        return "HIT";
+    }
+
+    async function runBlackjack() {
+        const n = Math.max(1000, Math.min(2000000, Number($("bjN").value) || 100000));
+        const decks = Math.max(1, Math.min(8, Number($("bjDecks").value) || 6));
+        const btn = $("bjRun");
+        btn.disabled = true;
+        const out = $("bjOut");
+        out.innerHTML = "<span class='mut'>Simulation…</span>";
+
+        let s = shoe(decks);
+        let i = 0;
+        let net = 0, wins = 0, losses = 0, pushes = 0, naturals = 0;
+        const curve = [];
+
+        const draw = () => {
+            if (i >= s.length) { s = shoe(decks); i = 0; }
+            return s[i++];
+        };
+
+        for (let h = 0; h < n; h++) {
+            const p = [draw(), draw()];
+            const d = [draw(), draw()];
+            let bet = 1;
+            const pv = hand(p);
+            const dv = hand([d[0]]);
+            const natural = pv.total === 21 && p.length === 2;
+            const dealerNatural = cardValue(d[0]) + cardValue(d[1]) === 21;
+
+            if (natural) {
+                naturals++;
+                net += dealerNatural ? 0 : 1.5;
+                if (dealerNatural) pushes++; else wins++;
+                continue;
+            }
+            if (dealerNatural) { losses++; net -= bet; continue; }
+
+            let busted = false;
+            while (true) {
+                const v = hand(p);
+                if (v.total >= 21) break;
+                const action = basic(p, v.total, v.soft, cardValue(d[0]), p.length === 2);
+                if (action === "STAND") break;
+                if (action === "DOUBLE") { bet = 2; p.push(draw()); break; }
+                p.push(draw());
+            }
+            if (hand(p).total > 21) { busted = true; losses++; net -= bet; curve.push(net); continue; }
+
+            while (true) {
+                const v = hand(d);
+                if (v.total >= 17) break;
+                d.push(draw());
+            }
+            const player = hand(p).total;
+            const dealer = hand(d).total;
+            if (dealer > 21 || player > dealer) { wins++; net += bet; }
+            else if (player === dealer) { pushes++; }
+            else { losses++; net -= bet; }
+            if (h % 1000 === 0) curve.push(net);
+        }
+
+        const ev = net / n;
+        out.innerHTML = `
+            <div class="kv"><span>Mains</span><b>${n.toLocaleString()}</b></div>
+            <div class="kv"><span>EV par main</span><b class="${ev > 0 ? "good" : "bad"}">${pct(ev)}</b></div>
+            <div class="kv"><span>Gains / pertes / push</span><b>${pct(wins / n)} / ${pct(losses / n)} / ${pct(pushes / n)}</b></div>
+            <div class="kv"><span>Blackjacks</span><b>${pct(naturals / n)}</b></div>
+            <div class="kv"><span>Avantage maison</span><b class="${ev < 0 ? "good" : "bad"}">${pct(-ev)}</b></div>
+        `;
+        chart($("bjChart"), curve, "#5865f2");
+        btn.disabled = false;
+    }
+
+    /* -------------------------------- Mines ------------------------------ */
+
+    function survival(safe, digs) {
+        let p = 1;
+        for (let i = 0; i < digs; i++) p *= (safe - i) / (20 - i);
+        return p;
+    }
+
+    async function runMines() {
+        const tnt = Math.max(1, Math.min(10, Number($("mTnt").value) || 1));
+        const digs = Math.max(1, Math.min(10, Number($("mDig").value) || 1));
+        const mult = Math.max(0, Number($("mMult").value) || 0);
+        const n = Math.max(1000, Math.min(2000000, Number($("mN").value) || 200000));
+        const btn = $("mRun");
+        btn.disabled = true;
+        const out = $("mOut");
+        out.innerHTML = "<span class='mut'>Simulation…</span>";
+
+        let net = 0, survived = 0;
+        const curve = [];
+        const cells = Array.from({ length: 20 }, (_, i) => i);
+
+        for (let r = 0; r < n; r++) {
+            // Placement uniforme de `tnt` bombes.
+            const grid = new Array(20).fill(false);
+            let placed = 0;
+            while (placed < tnt) {
+                const k = Math.floor(Math.random() * 20);
+                if (!grid[k]) { grid[k] = true; placed++; }
+            }
+            let alive = true;
+            for (let step = 0; step < digs; step++) {
+                if (grid[step]) { alive = false; break; }
+            }
+            if (alive) { survived++; net += mult - 1; }
+            else net -= 1;
+            if (r % 1000 === 0) curve.push(net);
+        }
+
+        const ev = net / n;
+        const exact = survival(20 - tnt, digs) * mult - 1;
+        out.innerHTML = `
+            <div class="kv"><span>Parties</span><b>${n.toLocaleString()}</b></div>
+            <div class="kv"><span>Survie observée</span><b>${pct(survived / n)}</b></div>
+            <div class="kv"><span>Survie exacte</span><b>${pct(survival(20 - tnt, digs))}</b></div>
+            <div class="kv"><span>EV simulée</span><b class="${ev > 0 ? "good" : "bad"}">${pct(ev)}</b></div>
+            <div class="kv"><span>EV exacte</span><b class="${exact > 0 ? "good" : "bad"}">${pct(exact)}</b></div>
+        `;
+        chart($("mChart"), curve, "#248046");
+        btn.disabled = false;
+    }
+
+    /* -------------------------------- Chart ------------------------------ */
+
+    function chart(canvas, values, color) {
+        const dpr = window.devicePixelRatio || 1;
+        const w = canvas.clientWidth || 600;
+        const h = canvas.clientHeight || 120;
+        canvas.width = w * dpr; canvas.height = h * dpr;
+        const c = canvas.getContext("2d");
+        c.scale(dpr, dpr);
+        c.clearRect(0, 0, w, h);
+        if (values.length < 2) return;
+        const min = Math.min(...values, 0);
+        const max = Math.max(...values, 0);
+        const span = max - min || 1;
+        c.strokeStyle = "#2f3136";
+        c.beginPath();
+        const zero = h - ((0 - min) / span) * h;
+        c.moveTo(0, zero); c.lineTo(w, zero); c.stroke();
+        c.strokeStyle = color;
+        c.lineWidth = 1.5;
+        c.beginPath();
+        values.forEach((v, i) => {
+            const x = (i / (values.length - 1)) * w;
+            const y = h - ((v - min) / span) * h;
+            if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+        });
+        c.stroke();
+    }
+
+    $("bjRun").addEventListener("click", runBlackjack);
+    $("mRun").addEventListener("click", runMines);
+</script>
+</body>
+</html>

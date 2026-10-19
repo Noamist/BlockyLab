@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Blocky Lab · 00 · Core
 // @namespace    blocky-lab
-// @version      1.4.2
+// @version      1.5.0
 // @description  Noyau partagé du Blocky Lab : capture d'embeds, IndexedDB, accès aux modules Discord, envoi de commandes, panneau à onglets personnalisable, statistiques.
 // @match        https://discord.com/*
 // @match        https://canary.discord.com/*
@@ -28,7 +28,7 @@
         return;
     }
 
-    const VERSION = "1.4.2";
+    const VERSION = "1.5.0";
     const PREFIX = "blockylab.";
     const DB_NAME = "blocky-lab";
     const DB_STORE = "obs";
@@ -47,6 +47,15 @@
         if (typeof v === "number") return Number.isFinite(v) ? v : def;
         const n = Number(String(v ?? "").replace(/[^\d.,-]/g, "").replace(",", "."));
         return Number.isFinite(n) ? n : def;
+    };
+    // Le bot formate les émeraudes à l'anglaise (« 12,000 ») : sans déduction
+    // du séparateur de milliers, num("12,000") donnait 12. amountOf traite le
+    // groupe de 3 chiffres comme un séparateur, sinon la virgule est décimale.
+    const amountOf = v => {
+        const t = String(v ?? "").replace(/[\s\u00a0]/g, "");
+        if (/^\d{1,3}(?:[,.]\d{3})+$/.test(t)) return Number(t.replace(/[,.]/g, ""));
+        const n = Number(t.replace(",", "."));
+        return Number.isFinite(n) ? n : 0;
     };
     const safe = (fn, def) => { try { return fn(); } catch (e) { console.warn(NC, e); return def; } };
     const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -360,7 +369,7 @@
         const out = [];
         const re = /(\d{1,3}(?:[ \u00a0,.]\d{3})+|\d+(?:[.,]\d+)?)\s*(?:emeralds?|émeraudes?|emerald|coins?|💎)/gi;
         let m;
-        while ((m = re.exec(text))) out.push(Number(String(m[1]).replace(/[ \u00a0]/g, "").replace(",", ".")));
+        while ((m = re.exec(text))) out.push(amountOf(m[1]));
         return out;
     }
 
@@ -397,7 +406,11 @@
 
     function wheelNumber(text) {
         const t = norm(text);
-        let m = t.match(/(?:stopped|stops?|lands?|landed|tomb[ée]e?|result|r[ée]sultat|num[ée]ro|number)\D{0,16}(3[0-6]|[12]?\d)\b/i);
+        // Le bot écrit exactement : « The wheel stops on **🟥 Redstone 17**. »
+        // (ou « ⬛ Obsidian 5 », « 💎 Diamond block 0 » / « 00 »). On vise ce
+        // libellé de slot : « Redstone 17 » ne peut être qu'un numéro de wheel.
+        let m = t.match(/(?:redstone|obsidian|diamond\s*block)\s+(00|0|[1-9]|[12]\d|3[0-6])\b/i);
+        if (!m) m = t.match(/(?:stopped|stops?|lands?|landed|tomb[ée]e?|result|r[ée]sultat|num[ée]ro|number)\D{0,24}(3[0-6]|[12]?\d)\b/i);
         if (!m) m = t.match(/\b(3[0-6]|[12]?\d)\s*(?:\(|:|$)/);
         if (!m) return null;
         const n = Number(m[1]);
@@ -506,10 +519,10 @@
     const GAME_RULES = {
         luckyblock: { win: [/\b(?:netherite|emeralds?|diamonds?|gold|iron)\b/i], loss: [/\b(?:creeper|cobblestone)\b/i] },
         wheel: { win: [/\byou\s+win\b/i, /🎉/, /:tada:/i, /\bgagn[ée]/i], loss: [/\bbetter\b/i, /💸/, /:money_with_wings:/i, /\bperdu\b/i] },
-        mines: { win: [/\bcash(?:ed)?\s*out\b/i, /\bcashed\b/i, /\br[ée]cup[ée]r/i], loss: [/\bboom\b/i, /💥/, /\bexplos/i] },
+        mines: { win: [/\bcashed\s+out\s+(?:at|à)\b/i, /\br[ée]cup[ée]r/i], push: [/your\s+bet\s+(?:is\s+)?back/i, /mise\s+rendue/i], loss: [/\bboom\b/i, /💥/, /\bexplos/i] },
         blackjack: {
             win: [
-                /\byou\s+(?:win|won)\b/i, /\byou\s+got\s+(?:a\s+)?blackjack\b/i,
+                /\byou\s+(?:win|won)\b/i, /\bblackjack\s*!/i, /\byou\s+got\s+(?:a\s+)?blackjack\b/i,
                 /\bdealer\s+busts?\b/i, /\bcroupier\s+(?:saute|bust)/i,
                 /\bblackjack\s*!\s*(?:you|gagn)/i, /\byou\s+beat\s+the\s+dealer\b/i
             ],
@@ -605,9 +618,26 @@
     function betAmount(text) {
         const t = norm(text);
         let m = t.match(/(?:bet|mise|wager|parie?)\s*[:=-]?\s*(\d{1,3}(?:[ ,.]\d{3})+|\d+(?:[.,]\d+)?)/i);
-        if (m) return Number(m[1].replace(/[ ,]/g, "").replace(",", "."));
+        if (m) return amountOf(m[1]);
         m = t.match(/(\d{1,3}(?:[ ,.]\d{3})+|\d+(?:[.,]\d+)?)\s*(?:emeralds?|émeraudes?|💎)/i);
-        return m ? Number(m[1].replace(/[ ,]/g, "").replace(",", ".")) : null;
+        return m ? amountOf(m[1]) : null;
+    }
+
+    // Le résultat FINAL du Lucky Block n'affiche plus la mise (seul le cadre
+    // d'animation la montre) : on la reconstitue depuis le gain annoncé.
+    // « You win **500** (×2.5): **+300** » → 300/(2.5−1) = 200 ;
+    // « You get 100 back (−100) » → 200 ; « 💸 Lost: 200 » → 200.
+    function luckyBet(text) {
+        const t = norm(text);
+        let m = t.match(/\(×\s*([\d.]+)\s*\)[^+\d]{0,12}[+]\s*([\d\s.,]+)/i);
+        if (m) {
+            const p = Number(m[1]), gain = amountOf(m[2]);
+            if (p > 1) return Math.round(gain / (p - 1));
+        }
+        m = t.match(/(?:get|re[cç]oit|re[cç]up)[^(\d]{0,12}([\d\s.,]+)\s*(?:back|rendu)[^(]{0,6}\(.\s*([\d\s.,]+)/i);
+        if (m) return Math.round(amountOf(m[1]) + amountOf(m[2]));
+        m = t.match(/(?:lost|perdu)[^.\d]{0,6}([\d\s.,]+)/i);
+        return m ? Math.round(amountOf(m[1])) : null;
     }
 
     function analyzeText(text) {
@@ -626,6 +656,7 @@
             detail.number = wheelNumber(raw);
             detail.color = wheelColor(raw, detail.number);
         }
+        if (game === "luckyblock" && detail.bet == null) detail.bet = luckyBet(raw);
         if (game === "mining") detail.mining = parseMining(raw);
         if (game === "blackjack" && detail.cards.length) {
             const hv = handValue(detail.cards);
@@ -634,8 +665,25 @@
         }
         if (game === "blackjack" && label === "push") detail.refund = true;
         if (detail.bet != null && label) {
-            detail.net = label === "win" ? detail.bet : label === "loss" ? -detail.bet : 0;
-            detail.payout = label === "win" ? detail.bet * 2 : label === "push" ? detail.bet : 0;
+            // Le bot affiche le gain/perte exact : « **+300 ** », « (−200) », « −20 ».
+            // Le « ×2 » générique faussait tout : la wheel sur un numéro (×36)
+            // et le Lucky Block (×1,5 à ×10). On lit le montant signé du message ;
+            // ×2 et −mise ne sont que les replis pour un format non reconnu.
+            const wheelWin = game === "wheel" && label === "win"
+                ? raw.match(/win\s+\*\*\s*([\d\s.,]+)\s*\*\*/i) : null;
+            const signed = raw.match(/[+＋]\s*([\d\s.,]+)/) || raw.match(/[−–—]\s*([\d\s.,]+)\s*\)/);
+            if (signed) {
+                const v = Math.round(amountOf(signed[1]));
+                detail.net = /[−–—]/.test(signed[0]) ? -Math.abs(v) : v;
+            } else if (wheelWin) {
+                detail.net = Math.round(amountOf(wheelWin[1])) - detail.bet;
+            } else if (label === "loss") {
+                const lost = raw.match(/(?:lost|perdu)[^.\d]{0,6}([\d\s.,]+)/i);
+                detail.net = lost ? -Math.round(amountOf(lost[1])) : -detail.bet;
+            } else {
+                detail.net = label === "win" ? detail.bet : 0;
+            }
+            detail.payout = detail.bet + detail.net;
         }
         return { game, label, detail, text: raw };
     }

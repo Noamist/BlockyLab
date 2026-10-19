@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Blocky Lab · 04 · Jeux & EV
 // @namespace    blocky-lab
-// @version      1.0.0
+// @version      1.1.0
 // @description  Analyse des mini-jeux Blocky : RTP réel du Lucky Block, biais et espérance de la wheel, calcul exact de survie/EV des Mines et stop optimal.
 // @match        https://discord.com/*
 // @match        https://canary.discord.com/*
@@ -26,12 +26,31 @@
         { key: "netherite", label: "⬛ Netherite", p: 0.005, mult: 10 }
     ];
 
-    // Table documentée par le wiki Blocky (mise × multiplicateur au cash-out).
-    const MINES_TABLE = {
-        1: [1.0, 1.12, 1.27],
-        3: [1.12, 1.59, 2.38],
-        5: [1.27, 2.38, 4.9]
-    };
+    // Vérité terrain (game/mines.py du bot) : le multiplicateur EST une formule,
+    // pas une table. Le wiki affichait ×1,12 / ×1,27 après 2 / 3 blocs avec
+    // 1 TNT — le bot paie en réalité ×1,06 / ×1,12. EV = mines_return exact
+    // (95 % par défaut) : les Mines ne sont PAS +EV.
+    //   fair(d, tnt) = Π_{i=0..d−1} (20−i) / (20−tnt−i)
+    //   mult(d, tnt) = min(mines_max_multiplier (25), fair × mines_return (0,95))
+    // Payout entier : floor(mise × mult + 0,5) (arrondi au demi supérieur).
+    const MINES = { CELLS: 20, RETURN: 0.95, MAX_MULT: 25, TNT_MAX: 10 };
+
+    function minesFair(dug, tnt) {
+        let fair = 1;
+        for (let i = 0; i < dug; i++) fair *= (MINES.CELLS - i) / (MINES.CELLS - tnt - i);
+        return fair;
+    }
+
+    function minesMult(dug, tnt) {
+        if (!dug) return 0;
+        return Math.min(MINES.MAX_MULT, minesFair(dug, tnt) * MINES.RETURN);
+    }
+
+    function minesSurvival(safe, digs) {
+        let p = 1;
+        for (let i = 0; i < digs; i++) p *= (safe - i) / (MINES.CELLS - i);
+        return p;
+    }
 
     async function boot() {
         for (let i = 0; i < 200 && !W.BlockyLab; i++) await new Promise(r => setTimeout(r, 100));
@@ -65,13 +84,33 @@
                 kv("Espérance par mise", `${((theoretical - 1) * 100).toFixed(2)} %`)
             ));
 
+            // Faille VÉRIFIÉE dans le code (game/luckyblock.py du bot) :
+            // won = floor(mise × payout + 0,5) → l'arrondi est au demi SUPÉRIEUR.
+            // Les payouts à 0,5 (cobblestone ×0,5, gold ×1,5, diamond ×2,5)
+            // arrondissent vers le haut sur une mise IMPAIRE : mise 3 → 3,08
+            // émeraudes de retour (+26,7 %), mise 1 → 1,18 (+18 %). Sur mise
+            // paire l'arrondi est neutre : RTP = 95 % exact.
+            const evBet = bet => LUCKY.reduce((s, o) => s + o.p * Math.floor(bet * o.mult + 0.5), 0);
+            const rows = [];
+            for (let b = 1; b <= 20; b++) rows.push({ bet: b, ev: evBet(b), rtp: evBet(b) / b });
+            const best = rows.reduce((a, r) => (r.rtp > a.rtp ? r : a), rows[0]);
+            wrap.appendChild(card("Faille vérifiée : arrondi des gains (mises impaires)",
+                ...rows.slice(0, 10).map(r => kv(`Mise ${r.bet}`, `${r.ev.toFixed(3)} émeraudes — RTP ${pct(r.rtp)}`, r.rtp > 1 ? "bl-good" : "")),
+                kv("Meilleure mise (1–20)", `mise ${best.bet} → RTP ${pct(best.rtp)}`, best.rtp > 1 ? "bl-good" : ""),
+                h("div", { class: "bl-muted", text: "Vérifié dans game/luckyblock.py : floor(mise × payout + 0,5). Cobblestone (×0,5), gold (×1,5) et diamond (×2,5) arrondissent VERS LE HAUS sur mise impaire — la maison perd alors 2 à 27 % au lieu de gagner 5 %. À confirmer in game (quelques mises de 3 dans la limite quotidienne), et à signaler au staff : c'est un correctif d'arrondi, pas une stratégie durable." })
+            ));
+
             if (obs.length) {
                 const counts = LUCKY.map(o => obs.filter(x => x.detail.category === o.key).length);
                 const n = counts.reduce((a, b) => a + b, 0);
                 const observedP = counts.map(c => c / n);
                 const chi = stats.chiSquare(counts, LUCKY.map(o => o.p * n));
 
-                const payouts = obs.map(o => (LUCKY.find(x => x.key === o.detail.category) || {}).mult || 0);
+                // RTP exact : payout/mise lus dans le message (le noyau 00 les
+                // extrait désormais) ; repli sur le multiplicateur de table.
+                const payouts = obs.map(o => (o.detail.bet > 0 && o.detail.payout != null)
+                    ? o.detail.payout / o.detail.bet
+                    : (LUCKY.find(x => x.key === o.detail.category) || {}).mult || 0);
                 const m = stats.mean(payouts);
                 const sd = Math.sqrt(stats.variance(payouts));
                 const se = n ? sd / Math.sqrt(n) : 0;
@@ -101,7 +140,7 @@
                 kv("Edge", pct(edge), edge > 0 ? "bl-good" : "bl-bad"),
                 kv("Kelly fractionnaire (¼)", `${(Math.max(0, kelly) / 4 * 100).toFixed(2)} % de la bankroll`),
                 kv("Mise recommandée", edge > 0 ? "uniquement si l'edge est confirmé" : "0 — le jeu est perdant à long terme"),
-                h("div", { class: "bl-muted", text: "Limite quotidienne du bot : 3 000 émeraudes de gains nets sur les jeux de hasard. Le Gambler ne change pas l'EV, seulement la variance." })
+                h("div", { class: "bl-muted", text: "Limite quotidienne du bot (par défaut) : 1 500 émeraudes de gains nets aux jeux de hasard (×2 pendant une Gambling Frenzy). Mises : 1 à 200 (300 pour un Gambler). Le Gambler ne change pas l'EV, seulement la variance." })
             ));
             return wrap;
         }
@@ -223,7 +262,7 @@
             wrap.appendChild(pileCard);
 
             const typeCard = card("Types de blocs",
-                h("div", { class: "bl-muted", text: "Le wiki ne publie pas les probabilités exactes. Ces fréquences sont la meilleure estimation disponible et un bon test de cohérence (bedrock/obsidienne rares)." })
+                h("div", { class: "bl-muted", text: "Odds réelles du code (overworld, sans talent ni pioche) : pile 6 → terre 50 % / pierre 50 % ; pile 4-5 → 20/50/30 (terre/pierre/gravier) ; pile 2-3 → pierre 70 % / gravier 20 % / ardoise 10 % ; pile 1 → pierre 70 % / gravier 20 % / ardoise 9 % / obsidienne 3 % / bedrock 1 %. La pioche, la pelle et les talents modifient ces poids : mesure avec ton équipement et compares à la config du serveur (config.json → balance mining.odds_*)." })
             );
             for (const [k, v] of Object.entries(types)) {
                 typeCard.appendChild(h("div", { class: "bl-row" }, h("span", { text: k }), h("span", { class: "bl-spacer" }), h("b", { text: `${v} (${totalBlocks ? pct(v / totalBlocks) : "—"})` })));
@@ -260,32 +299,26 @@
             });
 
             function compute() {
-                const safe = 20 - state.tnt;
-                const p = survival(safe, 20, state.digs);
-                const table = MINES_TABLE[state.tnt];
-                const mult = table ? table[state.digs - 1] : null;
-                const ev = mult === null ? null : mult * p;
-                const kelly = mult !== null && ev > 1 ? (ev - 1) / (mult - 1) : 0;
+                const safe = MINES.CELLS - state.tnt;
+                const p = minesSurvival(safe, state.digs);
+                const mult = minesMult(state.digs, state.tnt);
+                const ev = mult * p;
+                const kelly = ev > 1 ? (ev - 1) / (mult - 1) : 0;
+                // Arrondi réel du bot : floor(mise × mult + 0,5) — sur une petite
+                // mise, le +0,5 peut relever le payout d'une émeraude entière.
+                const r1 = Math.floor(state.bet * mult + 0.5) / state.bet;
 
                 out.textContent = "";
                 out.append(
-                    kv("Cellules sûres", `${safe} / 20`),
+                    kv("Cellules sûres", `${safe} / ${MINES.CELLS}`),
                     kv("Probabilité de survivre", pct(p)),
-                    kv("Multiplicateur affiché", mult === null ? "non documenté" : `×${mult}`),
-                    kv("Espérance (RTP)", ev === null ? "—" : pct(ev), ev === null ? "" : ev > 1 ? "bl-good" : "bl-bad"),
-                    kv("Gain net attendu pour 10", ev === null ? "—" : `${((ev - 1) * 10).toFixed(2)} émeraudes`),
+                    kv("Multiplicateur affiché", `×${mult.toFixed(2)}`),
+                    kv("Espérance théorique (RTP)", pct(ev), "bl-bad"),
+                    kv(`RTP avec arrondi (mise ${state.bet})`, pct(r1 * p)),
                     kv("Kelly ¼", kelly ? `${(kelly / 4 * 100).toFixed(2)} %` : "0 %")
                 );
 
-                if (mult !== null && ev > 1) {
-                    out.appendChild(h("div", { class: "bl-inline" },
-                        h("b", { class: "bl-good", text: "État +EV détecté" }),
-                        h("div", { text: `D'après la table du wiki, creuser ${state.digs} bloc(s) avec ${state.tnt} TNT rend ${pct(ev)} de la mise. Vérifie le multiplicateur réel dans le message du bot avant de jouer : si le wiki est exact, c'est un edge exploitable.` })
-                    ));
-                }
-                if (mult === null) {
-                    out.appendChild(h("div", { class: "bl-muted", text: "La table publiée ne couvre que 1, 3 et 5 TNT. Utilise le mode calibration pour saisir les multiplicateurs observés." }));
-                }
+                out.appendChild(h("div", { class: "bl-muted", text: `Verdict code : les Mines paient le jeu juste × ${MINES.RETURN} (${MINES.RETURN * 100} %) — le RTP ne dépasse pas ${MINES.RETURN * 100} % (arrondi compris, hors mises minuscules). Il n'y a pas d'edge : la table du wiki (×1,12 après 2 blocs) était fausse.` }));
             }
 
             function buildGrid() {
@@ -325,21 +358,20 @@
                     h("label", { class: "bl-col" }, h("span", { class: "bl-label", text: "Blocs sûrs creusés avant cash-out" }), digInput),
                     out
                 ),
-                card("Table complète (wiki)",
+                card("Table calculée (code du bot, mines_return 0,95)",
                     h("table", { class: "bl-table" },
-                        h("thead", null, h("tr", null, h("th", { text: "TNT" }), h("th", { text: "1 bloc" }), h("th", { text: "2 blocs" }), h("th", { text: "3 blocs" }), h("th", { text: "RTP max" }))),
+                        h("thead", null, h("tr", null, h("th", { text: "TNT" }), ...[1, 2, 3, 4, 5].map(d => h("th", { text: `${d} bloc${d > 1 ? "s" : ""}` })), h("th", { text: "RTP après 5 blocs" }))),
                         h("tbody", null,
-                            ...Object.entries(MINES_TABLE).map(([tnt, mults]) => {
-                                const best = Math.max(...mults.map((m, i) => m * survival(20 - Number(tnt), 20, i + 1)));
-                                return h("tr", null,
+                            ...Array.from({ length: MINES.TNT_MAX }, (_, i) => i + 1).map(tnt =>
+                                h("tr", null,
                                     h("td", { text: tnt }),
-                                    ...mults.map(m => h("td", { text: "×" + m })),
-                                    h("td", { class: best > 1 ? "bl-good" : "bl-bad", text: pct(best) })
-                                );
-                            })
+                                    ...[1, 2, 3, 4, 5].map(d => h("td", { text: "×" + minesMult(d, tnt).toFixed(2) })),
+                                    h("td", { text: pct(minesMult(5, tnt) * minesSurvival(MINES.CELLS - tnt, 5)) })
+                                )
+                            )
                         )
                     ),
-                    h("div", { class: "bl-muted", text: "Calcul exact : P(survie après d blocs) = Π (S−i)/(20−i). EV = multiplicateur × P. Toute case dont l'EV dépasse 100 % est une faille de calibration du bot." })
+                    h("div", { class: "bl-muted", text: "Formule exacte du bot : ×(d, tnt) = Π (20−i)/(20−tnt−i) × 0,95, plafonné à ×25 (auto cash-out). Le RTP vaut exactement 95 % après chaque bloc : c'est le jeu juste moins la part du bot (5 %). Toute valeur observée en jeu supérieure à ce tableau signale un écart à vérifier." })
                 ),
                 card("Grille observée",
                     h("div", { class: "bl-muted", text: "Clique les cases où le bot a révélé du TNT pour compter la disposition, puis vérifie si les positions sont uniformes sur plusieurs parties." }),

@@ -1,8 +1,12 @@
 // ==UserScript==
 // @name         Blocky Lab · 02 · RNG Lab
 // @namespace    blocky-lab
-// @version      1.0.0
+// @version      1.0.1
 // @description  Analyse statistique et recherche de seed : biais, indépendance, autocorrélation, familles de PRNG, force brute sur fenêtre temporelle et prédiction en direct.
+//               ATTENDU contre Blocky (bot Python) : AUCUN candidat en recherche de seed — le bot tire d'un
+//               Mersenne Twister semé par l'OS (random.Random() dans game/db.py), jamais par l'horloge.
+//               Voir docs/FINDINGS.md § L4 : un résultat négatif EST la réponse attendue. Les tests
+//               statistiques (Biais / Vue d'ensemble) restent la bonne approche.
 // @match        https://discord.com/*
 // @match        https://canary.discord.com/*
 // @match        https://ptb.discord.com/*

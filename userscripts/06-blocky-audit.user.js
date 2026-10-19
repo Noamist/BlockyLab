@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Blocky Lab · 06 · Audit
 // @namespace    blocky-lab
-// @version      1.1.0
-// @description  Catalogue d'audit inspiré du wiki Blocky : hypothèses, commandes, étapes, statuts, preuves et rapport exportable.
+// @version      1.2.0
+// @description  Catalogue d'audit ancré sur le code source du bot (Blocky-main) : failles vérifiées, verdicts réels, étapes, preuves et rapport exportable.
 // @match        https://discord.com/*
 // @match        https://canary.discord.com/*
 // @match        https://ptb.discord.com/*
@@ -60,15 +60,27 @@
 
         const TESTS = [
             {
-                id: "mines-rtp", cat: "Minijeux", sev: "crit", title: "Mines : multiplicateurs et RTP",
-                hypo: "La table du wiki donne ×1,27 après 3 blocs avec 1 TNT. Si le bot applique ces multiplicateurs sans ajuster la survie, l'EV est > 100 %.",
-                expect: "Survie exacte 17/20 × 16/19 × 15/18 = 85 %. EV = 1,27 × 0,85 = 107,95 %. Avec 2 blocs : 1,12 × 0,90 = 100,8 %.",
+                id: "lucky-rounding", cat: "Minijeux", sev: "crit", title: "Lucky Block : arrondi des gains sur mises impaires (faille L1)",
+                hypo: "Vérifié dans le code (game/luckyblock.py) : won = floor(mise × payout + 0,5). Les payouts à 0,5 (×0,5 / ×1,5 / ×2,5) arrondissent vers le HAUT sur une mise impaire — mise 1 → RTP 118 %, mise 3 → 102,7 % ; mises paires → 95 % exact.",
+                expect: "Confirmation in game : sur 200–400 mises de 1 émeraude, le net mesuré doit être nettement positif (z > 1,96).",
+                cmd: "/luckyblock amount:1", safe: false,
+                steps: [
+                    "Noter le solde ; jouer 200–400 /luckyblock amount:1 (cooldown 5 s ; le cap quotidien de 1 500 nets ne bloque pas les pertes).",
+                    "Onglet Jeux > Lucky Block : lire le RTP mesuré (attendu ~118 %) et le net total.",
+                    "Un z > 1,96 confirme ; capture + calcul = rapport à envoyer au staff (correctif : round() au lieu de floor(x+0,5)).",
+                    "Ne pas pousser au-delà : c'est un bug d'arrondi à signaler, pas une mine d'or (plafonné par le cap)."
+                ]
+            },
+            {
+                id: "mines-rtp", cat: "Minijeux", sev: "med", title: "Mines : vérifier la formule réelle (EV attendue 95 %)",
+                hypo: "Piste +EV ÉCARTÉE par le code : mult(d, tnt) = Π (20−i)/(20−tnt−i) × 0,95 (plafond ×25). Le tableau du wiki (×1,27 à 3 blocs) était faux. Reste à vérifier la calibration affichée in game.",
+                expect: "1 TNT : ×1,00 après 1 bloc, ×1,06 après 2, ×1,12 après 3. EV = 95 % exact après chaque bloc.",
                 cmd: "/mines amount:{amount} tnt:1", safe: false,
                 steps: [
-                    "Jouer 1 TNT / 3 blocs jusqu'à 30 parties, noter le multiplicateur affiché à chaque cash-out.",
-                    "Comparer au multiplicateur de la table ; noter aussi les multiplicateurs à 2 blocs.",
-                    "Dans l'onglet Jeux > Mines, saisir les multiplicateurs observés et vérifier l'EV.",
-                    "Si l'EV reste > 100 % sur 100+ parties, la faille est confirmée."
+                    "Jouer 1 TNT, noter le multiplicateur affiché après 1, 2 et 3 blocs creusés.",
+                    "Comparer à ×1,00 / ×1,06 / ×1,12 (l'onglet Jeux > Mines calcule la valeur exacte).",
+                    "Un écart > 0,01 est un vrai bug de calibration à signaler.",
+                    "Vérifier aussi l'auto cash-out à ×25 et le remboursement si aucun bloc creusé."
                 ]
             },
             {
@@ -95,21 +107,20 @@
                 ]
             },
             {
-                id: "bj-shoe", cat: "Minijeux", sev: "med", title: "Blackjack : sabot, mélange et pénétration",
-                hypo: "Si le bot ne mélange pas à chaque main, le comptage Hi-Lo donne un avantage réel. S'il tire avec remise, le comptage est inutile.",
-                expect: "Un sabot de 6 jeux doit consommer des cartes et se mélanger à la pénétration annoncée. Une même carte ne doit pas apparaître plus de 6 fois par sabot.",
+                id: "bj-shoe", cat: "Minijeux", sev: "low", title: "Blackjack : sabot neuf à chaque main (comptage sans objet)",
+                hypo: "ÉCARTÉ par le code : blackjack.start crée un sabot de 52 cartes mélangé pour CHAQUE main (new_deck). Le comptage Hi-Lo est inutile ; seule la stratégie de base compte (EV ≈ −0,4 %).",
+                expect: "Chaque main part d'un sabot neuf : aucune corrélation entre deux mains ; une même carte sort au plus 4 fois par main.",
                 cmd: "", safe: true,
                 steps: [
-                    "Activer le comptage Hi-Lo, jouer 20 mains et comparer cartes vues / sabot.",
-                    "Chercher un message de mélange ; sinon utiliser « Nouveau sabot » manuellement.",
-                    "Compter les occurrences d'une carte précise sur 200 tirages : > 6 par sabot = remise.",
-                    "Si remise, désactiver les déviations au true count."
+                    "Rejouer 20 mains : le comptage du script repart à zéro à chaque main (comportement normal).",
+                    "Vérifier l'affichage des cartes (`` `A♠` ``, `` `🂠` ``) pour le parseur du noyau.",
+                    "Un blackjack naturel paie 3:2 (sur mise 1 : ×2, arrondi de floor(x+0,5))."
                 ]
             },
             {
                 id: "wheel-rtp", cat: "Minijeux", sev: "high", title: "Wheel : RTP et biais de couleur",
                 hypo: "La roulette peut avoir un RTP > 100 % sur une couleur, ou un biais détectable sur les 37 numéros.",
-                expect: "RTP annoncé ~95–97 %. Sur 370 tours, χ² à 36 degrés de liberté doit rester non significatif après correction de Bonferroni.",
+                expect: "RTP 36/37 = 97,3 % (une seule case verte par défaut). Sur 370 tours, χ² à 36 ddl doit rester non significatif après Bonferroni. Les emojis de l'animation ne sont PAS des sorties du jeu.",
                 cmd: "/wheel number:0 amount:{amount}", safe: false,
                 steps: [
                     "Collecter 300+ tours dans l'onglet RNG Lab.",
@@ -121,7 +132,7 @@
             {
                 id: "lucky-rtp", cat: "Minijeux", sev: "high", title: "Lucky Block : RTP et catégories",
                 hypo: "Les probabilités de catégories peuvent différer du wiki, ou une catégorie rare peut être sur-pondérée.",
-                expect: "RTP 95 % avec les probabilités du wiki ; creeper 31,5 %, cobblestone 22 %, émeraudes 18 %, or 15 %, diamants 9 %, fer 4 %, netherite 0,5 %.",
+                expect: "RTP 95 % sur mises paires ; creeper 31,5 % ×0, cobblestone 22 % ×0,5, fer 18 % ×1, or 15 % ×1,5, diamants 9 % ×2,5, émeraudes 4 % ×4, netherite 0,5 % ×10 (poids 315/220/180/150/90/40/5, game/settings.py).",
                 cmd: "/luckyblock amount:{amount}", safe: false,
                 steps: [
                     "Collecter 200+ blocs dans l'onglet Jeux > Lucky Block.",
@@ -311,15 +322,15 @@
                 ]
             },
             {
-                id: "boss-window", cat: "PvP", sev: "med", title: "Boss : fenêtre 24 h et partage des dégâts",
-                hypo: "Les dégâts peuvent être comptés deux fois, ou la fenêtre de 24 h peut être contournée.",
-                expect: "Boss toutes les 72 h ; fenêtre de 24 h ; partage des dégâts ; top 3 récompensé.",
-                cmd: "/boss", safe: true,
+                id: "boss-window", cat: "PvP", sev: "med", title: "Boss de porte : entry, cooldown 12 h, groupes (ancien serveur-boss retiré)",
+                hypo: "Les anciens boss partagés (/attack) ont été remplacés par des boss de porte en groupe : Wither (entrée 1 500, butin 3 000), Dragon (3 000 / 6 000), Warden (6 000 / 12 000). Une double entrée ou un cooldown contournable serait une faille.",
+                expect: "1 combat / 12 h / joueur ; groupe ≤ 4 ; entrée remboursée si le groupe ne démarre pas (5 min) ou si le leader part ; chaque survivant ouvre la dimension suivante.",
+                cmd: "/boss info", safe: true,
                 steps: [
-                    "Noter l'heure d'apparition et la fin de la fenêtre.",
-                    "Attaquer après 24 h : doit être refusé.",
-                    "Comparer le total des dégâts au HP du boss.",
-                    "Vérifier les récompenses du top 3."
+                    "Relire /boss info : entrée, butin, cooldown, dimensions ouvertes.",
+                    "Rejoindre un groupe puis le quitter avant le start : l'entrée doit être remboursée.",
+                    "Tenter un second combat dans les 12 h : refus attendu.",
+                    "Vérifier qu'un double clic sur le bouton d'entrée ne paie pas deux fois."
                 ]
             },
             {

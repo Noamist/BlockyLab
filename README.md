@@ -106,18 +106,19 @@ Le serveur n'écoute que sur `127.0.0.1` par défaut (`HOST`/`PORT` pour changer
 
 | Hypothèse | Où | Verdict attendu |
 |---|---|---|
-| RNG biaisée (Lucky Block / Wheel) | RNG Lab → Biais | Le plus probable si le bot utilise `Math.random` avec des arrondis ou un modulo biaisé. |
-| Résultats dépendants du précédent | RNG Lab → Vue d'ensemble | Markov / runs test. |
-| Seed = horloge | RNG Lab → Seed | Possible avec les LCG maison ; **impossible** avec `Math.random` de V8 (xorshift128+, seedé par l'OS). |
-| Mines +EV | Jeux → Mines | La table du wiki donne **+8 %** à 3 blocs avec 1 TNT. À vérifier en jeu : c'est la piste la plus concrète. |
-| Shoe de blackjack persistante | Blackjack | Si le sabot n'est pas mélangé à chaque main, le comptage Hi-Lo donne un edge réel. |
-| Drop snipé | Pilote → Drops | Le premier clic gagne : un script bat un humain de 100–300 ms. |
-| Latence exploitable | Recon | La distribution des délais permet de réduire la fenêtre de seed. |
-| Boutons rejouables | Recon → custom_id | Un `custom_id` contenant un ID de session/partie est un candidat ; un ID statique ne l'est pas. |
-| Double acceptation d'un trade | Trade Lab | Accepter deux fois / accepter puis annuler. Un double crédit est critique. |
-| Course sur `/loan`, `/auction` | Trade Lab + Fuzz | Deux clients, même instant. Vérifier les soldes et les doublons. |
-| Montants limites | Fuzzer | 0, négatif, 1e9, NaN, Infinity, 2⁵³. Un refus propre est le comportement attendu. |
-| Cooldowns contournés | Audit → Course de cooldown | Deux commandes simultanées, deux salons, boutons. |
+| **Lucky Block : arrondis +EV (mises impaires)** | Jeux → Lucky Block | **Vérifié dans le code** : `floor(mise × payout + 0,5)` rend les mises 1 et 3 profitables (RTP 118 % / 102,7 %). Confirmer in game : 200–400 mises de 1. |
+| RNG biaisée (Lucky Block / Wheel) | RNG Lab → Biais | Le bot est Python (MT19937 semé par l'OS) : le générateur est sain, mais un écart de calibration reste mesurable. |
+| Résultats dépendants du précédent | RNG Lab → Vue d'ensemble | Markov / runs test (attendu : indépendant). |
+| Seed = horloge | RNG Lab → Seed | **Écartée par le code** : `random.Random()` semé par l'OS, jamais par l'horloge. L'onglet sert de test de réfutation. |
+| Mines +EV | Jeux → Mines | **Écarté** : le multiplicateur est `jeu juste × 0,95` (EV = 95 % exact). Le tableau du wiki était faux. |
+| Shoe de blackjack persistante | Blackjack | **Écarté** : sabot de 52 cartes **neuf à chaque main** (`new_deck`). Le comptage est sans objet. |
+| Drop snipé | Pilote → Drops | Le premier clic gagne ; un second reçoit « Too late ! » éphémère (60 s). |
+| Latence exploitable | Recon | Mesure de charge uniquement (pas de seed d'horloge à réduire). |
+| Boutons rejouables | Recon → custom_id | `blocky:bj:hit:<game_id>` : l'état est en base, l'ID ne donne rien sans être le joueur de la game active. |
+| Double acceptation d'un trade | Trade Lab | Attendu : refus (drapeau + transaction). Toute acceptance double = faille critique. |
+| Course sur `/loan`, `/auction` | Trade Lab + Fuzz | Attendu : refus (statut de l'offre / suppression de l'annonce dans la transaction). |
+| Montants limites | Fuzzer | Les slash sont filtrés côté client (`Range[int,1]`) ; la surface réelle est boutons + champs libres. Un refus propre est attendu. |
+| Cooldowns contournés | Audit → Course de cooldown | Réservé avant le `await` (deux envois simultanés : un seul passe). Réinitialisés par un redémarrage du bot (staff). |
 
 Détails, protocole et limites : [docs/FINDINGS.md](docs/FINDINGS.md).
 
@@ -143,7 +144,8 @@ Les briques mathématiques ont été exécutées hors de Discord (Chromium) :
 - **χ² / erf / z-test** : p(3,841 ; df 1) = 0,050000, p(z=1,96) = 0,049996, p(z=2) = 0,045500.
 - **PRNG** : pour mulberry32, xorshift32, splitmix32, LCG, java.util.Random et MT19937, une séquence générée avec la seed 1 234 567 est retrouvée par la force brute sur ±1 000 seeds (6/6 familles).
 - **Blackjack** : 100 000 mains simulées, stratégie de base 6 jeux S17 → EV **−0,382 %** par main (43,53 % gains / 47,92 % pertes / 8,55 % push), cohérent avec l'avantage maison attendu.
-- **Mines** : 200 000 parties, 1 TNT, 3 blocs, ×1,27 → survie observée 85,09 % (exact 85 %), EV simulée **+8,06 %** (exact **+7,95 %**).
+- **Mines (v1.1.0)** : 200 000 parties simulées sur l'ANCIENNE table du wiki (×1,27 à 3 blocs avec 1 TNT) → +8 % d'EV. **Ce tableau était faux** : le code réel paie ×1,12 (EV 95 % exact). La simulation a été remplacée par la formule réelle de `game/mines.py` dans l'onglet Jeux.
+- **Lucky Block (v1.1.0)** : EV calculée sur les payouts réels **avec l'arrondi `floor(x+0,5)`** : mises 1 et 3 → RTP 118 % / 102,7 % (faille L1 de FINDINGS.md), mises paires → 95 % exact.
 - **Détection blackjack** : logique testée sur 6 cas synthétiques (anglais, français, emojis + `custom_id`, emojis sans `custom_id`, libellés inconnus, bouton Double désactivé) ; les quatre premiers signaux et le repli par position donnent les bonnes actions.
 
 Ces tests valident les formules, les générateurs et l'algorithme de détection, pas l'intégration Discord : les userscripts n'ont pas été exécutés contre un vrai salon dans cet environnement. Les sélecteurs webpack (`MessageStore`, `fetchMessages`, `sendMessage`) et les formats exacts des embeds restent à valider via l'onglet **Recon**.
@@ -158,7 +160,7 @@ python3 -m http.server 8000
 
 ## 7. Limites honnêtes
 
-- **On ne casse pas `Math.random` de V8.** Un xorshift128+ seedé par l'OS ne se retrouve pas à partir de sorties modulo 37. L'onglet Seed élimine les générateurs faibles ; un résultat négatif est une information, pas un échec.
+- **On ne casse pas `Math.random` de V8… et le bot n'utilise même pas V8.** Blocky est un bot Python : ses tirages viennent d'un Mersenne Twister semé par l'OS (`random.Random()` dans `game/db.py`), partagé par tous les jeux. L'onglet Seed élimine les générateurs faibles ; contre ce bot, un résultat négatif **est** la réponse attendue. La piste exploitable n'était pas la seed : c'était un **arrondi** (voir docs/FINDINGS.md, faille L1).
 - **Le format des embeds n'est pas documenté.** Les parseurs sont tolérants (libellés FR/EN, emojis, plusieurs ordres de champs) mais peuvent rater un format. L'onglet Recon sert exactement à ça.
 - **Les probabilités du wiki peuvent être fausses ou obsolètes.** C'est justement ce que mesure le RTP empirique.
 - **Le bot peut valider côté serveur.** Un bouton cliqué deux fois, un montant négatif ou une interaction rejouée doivent être rejetés par le serveur ; sinon c'est une vraie faille à signaler.
@@ -195,7 +197,16 @@ blocky-lab/
 
 ---
 
-## 9. Autoplay blackjack : ce qui a changé (v5.2)
+## 10. Ancrage sur le code source (mise à jour v1.5.0 du noyau / v1.1.0 des jeux)
+
+La suite a d'abord été écrite à partir du wiki du bot. Elle est désormais **vérifiée par lecture du code source réel** (Blocky-main : `game/`, `cogs/`, `utils/`) :
+
+- **Une faille réelle trouvée** : `/luckyblock` paie `floor(mise × payout + 0,5)` — les mises **impaires** sont +EV (mise 1 : RTP 118 % ; mise 3 : 102,7 %). Détail, calcul et protocole de confirmation : [docs/FINDINGS.md](docs/FINDINGS.md) § L1, et le tableau de l'onglet Jeux → Lucky Block.
+- **Trois pistes fermées par le code** : Mines (EV = 95 % exact, formule réelle intégrée à l'onglet Jeux), sabot de blackjack (neuf à chaque main : le comptage est inutile), seed d'horloge (générateur semé par l'OS).
+- **Parseurs alignés sur les vrais formats d'embeds** : titres et lignes exacts du bot (« The wheel stops on **🟥 Redstone 17** », « 💰 Cashed out at **×1,06** », « 🃏 **Blackjack!** », gain/perte signé lu directement, détection des messages de jeu encore actifs, montants « 12,000 » correctement décodés).
+- **Surfaces vérifiées protégées** (courses, boutons, mentions, soldes) listées dans FINDINGS § L5, avec le test in game à mener une fois pour confirmer.
+
+Lisez [docs/FINDINGS.md](docs/FINDINGS.md) avant d' utiliser le Pilote : ce qui est fermé par le code ne mérite pas de temps de collecte.
 
 L'ancienne version cherchait les boutons uniquement par texte et injectait un panneau **dans l'embed**. Deux causes de blocage :
 
